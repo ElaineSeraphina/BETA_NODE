@@ -177,4 +177,4 @@ def handle_logout(proxy):
 
     status_connect = CONNECTION_STATES["NONE_CONNECTION"]
     account_info = {}
-    save_status(proxy, None
+    save_status(proxy, None)
