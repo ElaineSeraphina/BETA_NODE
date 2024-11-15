@@ -1,10 +1,8 @@
 import asyncio
-import aiohttp
 import time
 import uuid
-import cloudscraper  
+import cloudscraper
 from loguru import logger
-
 
 def show_copyright():
     copyright_info = """
@@ -14,10 +12,8 @@ def show_copyright():
     *           Version UJI COBA                        *
     *           Copyright (c) 2024                      *
     *           All Rights Reserved                     *
-    *                                                   *
-    *                                                   *
     *****************************************************
-    
+    """
     print(copyright_info)
 
     confirm = input("Press Enter to continue or Ctrl+C to exit... ")
@@ -28,12 +24,11 @@ def show_copyright():
         print("Exiting the program.")
         exit()
 
-
 # Constants
 PING_INTERVAL = 60  
 RETRIES = 60  
 PROXY_FILE = 'proxy.txt'  # Changed from 'proxy_1.txt'
-TOKEN_FILE = 'np_tokens_1.txt'  
+TOKEN_FILE = 'np_tokens_1.txt'
 
 DOMAIN_API = {
     "SESSION": "https://api.nodepay.ai/api/auth/session",
@@ -51,16 +46,13 @@ browser_id = None
 account_info = {}
 last_ping_time = {}  
 
-
 def uuidv4():
     return str(uuid.uuid4())
-
 
 def valid_resp(resp):
     if not resp or "code" not in resp or resp["code"] < 0:
         raise ValueError("Invalid response")
     return resp
-
 
 async def render_profile_info(proxy, token):
     global browser_id, account_info
@@ -96,7 +88,6 @@ async def render_profile_info(proxy, token):
             logger.error(f"Connection error: {e}")
             return proxy
 
-
 async def call_api(url, data, proxy, token):
     headers = {
         "Authorization": f"Bearer {token}",
@@ -119,7 +110,6 @@ async def call_api(url, data, proxy, token):
         logger.error(f"Error during API call: {e}")
         raise ValueError(f"Failed API call to {url}")
 
-
 async def start_ping(proxy, token):
     try:
         while True:
@@ -130,14 +120,13 @@ async def start_ping(proxy, token):
     except Exception as e:
         logger.error(f"Error in start_ping for proxy {proxy}: {e}")
 
-
 async def ping(proxy, token):
     global last_ping_time, RETRIES, status_connect
 
     current_time = time.time()
 
     if proxy in last_ping_time and (current_time - last_ping_time[proxy]) < PING_INTERVAL:
-        logger.info(f"Skipping ping for proxy { proxy}, not enough time elapsed")
+        logger.info(f"Skipping ping for proxy {proxy}, not enough time elapsed")
         return
 
     last_ping_time[proxy] = current_time
@@ -160,7 +149,6 @@ async def ping(proxy, token):
         logger.error(f"Ping failed via proxy {proxy}: {e}")
         handle_ping_fail(proxy, None)
 
-
 def handle_ping_fail(proxy, response):
     global RETRIES, status_connect
 
@@ -172,10 +160,89 @@ def handle_ping_fail(proxy, response):
     else:
         status_connect = CONNECTION_STATES["DISCONNECTED"]
 
-
 def handle_logout(proxy):
     global status_connect, account_info
 
     status_connect = CONNECTION_STATES["NONE_CONNECTION"]
     account_info = {}
     save_status(proxy, None)
+    logger.info(f"Logged out and cleared session info for proxy {proxy}")
+
+def load_proxies(proxy_file):
+    try:
+        with open(proxy_file, 'r') as file:
+            proxies = file.read().splitlines()
+        return proxies
+    except Exception as e:
+        logger.error(f"Failed to load proxies: {e}")
+        raise SystemExit("Exiting due to failure in loading proxies")
+
+def save_status(proxy, status):
+    pass  # Add logic if needed
+
+def save_session_info(proxy, data):
+    data_to_save = {
+        "uid": data.get("uid"),
+        "browser_id": browser_id  
+    }
+    pass  # Add logic to save session info
+
+def load_session_info(proxy):
+    return {}  # Add logic to load session information if needed
+
+def is_valid_proxy(proxy):
+    return True  # Add logic to check proxy validity
+
+def remove_proxy_from_list(proxy):
+    pass  # Add logic to remove proxy from list if needed
+
+def load_tokens_from_input():
+    tokens = []
+    while True:
+        token = input("Enter your token (or type 'done' to finish): ").strip()
+        if token.lower() == 'done':
+            break
+        tokens.append(token)
+    return tokens
+
+async def main():
+    all_proxies = load_proxies(PROXY_FILE)
+    tokens = load_tokens_from_input()  # Collect tokens from user input
+
+    while True:
+        for token in tokens:
+            active_proxies = [
+                proxy for proxy in all_proxies if is_valid_proxy(proxy)][:100]
+            tasks = {asyncio.create_task(render_profile_info(
+                proxy, token)): proxy for proxy in active_proxies}
+
+            done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                failed_proxy = tasks[task]
+                if task.result() is None:
+                    logger.info(f"Removing and replacing failed proxy: {failed_proxy}")
+                    active_proxies.remove(failed_proxy)
+                    if all_proxies:
+                        new_proxy = all_proxies.pop(0)
+                        if is_valid_proxy(new_proxy):
+                            active_proxies.append(new_proxy)
+                            new_task = asyncio.create_task(
+                                render_profile_info(new_proxy, token))
+                            tasks[new_task] = new_proxy
+                tasks.pop(task)
+
+            for proxy in set(active_proxies) - set(tasks.values()):
+                new_task = asyncio.create_task(
+                    render_profile_info(proxy, token))
+                tasks[new_task] = proxy
+
+            await asyncio.sleep(3)
+        await asyncio.sleep(10)  
+
+if __name__ == '__main__':
+    show_copyright()
+    print("Welcome to the main program!")
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Program terminated by user.")
