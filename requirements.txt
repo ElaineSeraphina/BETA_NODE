@@ -1,0 +1,5 @@
+loguru
+fake_useragent
+websockets
+asyncio
+sqlite3
