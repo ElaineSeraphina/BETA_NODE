@@ -1,4 +1,4 @@
-import requests  # Pastikan modul requests diimpor
+import aiohttp  # Pastikan aiohttp diimpor
 import asyncio
 import time
 import uuid
@@ -175,43 +175,4 @@ def load_proxies_from_file(file_name):
         logger.error(f"Failed to load proxies from file: {e}")
         raise SystemExit("Exiting due to failure in loading proxies")
 
-def save_status(proxy, status):
-    pass
-
-def save_session_info(proxy, data):
-    data_to_save = {
-        "uid": data.get("uid"),
-        "browser_id": browser_id
-    }
-    pass
-
-def load_session_info(proxy):
-    return {}
-
-async def main():
-    show_copyright()
-    print("Welcome to the main program!")
-        
-    # Token is now hardcoded in the script, no need to load from a file
-
-    # Load proxies from the local file proxy.txt
-    proxies = load_proxies_from_file("proxy.txt")  # File is expected to be in the same directory
-
-    while True:
-        tasks = {asyncio.create_task(render_profile_info(proxy)): proxy for proxy in proxies}
-
-        done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            tasks.pop(task)
-
-        for proxy in set(proxies) - set(tasks.values()):
-            new_task = asyncio.create_task(render_profile_info(proxy))
-            tasks[new_task] = proxy
-
-        await asyncio.sleep(3)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Program terminated by user.")
+def save_status(proxy, status
