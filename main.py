@@ -1,6 +1,5 @@
 import requests  # Pastikan modul requests diimpor
 import asyncio
-import aiohttp
 import time
 import uuid
 from loguru import logger
@@ -167,13 +166,13 @@ def handle_logout(proxy):
     save_status(proxy, None)
     logger.info(f"{Fore.YELLOW}Logged out and cleared session info for proxy {proxy}")
 
-def load_proxies(proxy_file):
+def load_proxies_from_file(file_name):
     try:
-        with open(proxy_file, 'r') as file:
+        with open(file_name, 'r') as file:
             proxies = file.read().splitlines()
         return proxies
     except Exception as e:
-        logger.error(f"Failed to load proxies: {e}")
+        logger.error(f"Failed to load proxies from file: {e}")
         raise SystemExit("Exiting due to failure in loading proxies")
 
 def save_status(proxy, status):
@@ -204,8 +203,8 @@ async def main():
         
     tokens = load_tokens_from_file(TOKEN_FILE)
 
-    # Load proxies from a local file instead of downloading
-    proxies = load_proxies("local_proxies.txt")  # Replace with the name of your local proxy file
+    # Load proxies from the local file proxy.txt
+    proxies = load_proxies_from_file("proxy.txt")  # File is expected to be in the same directory
 
     while True:
         for token in tokens:
