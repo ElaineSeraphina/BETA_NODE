@@ -6,7 +6,6 @@ import uuid
 from loguru import logger
 
 # Constants
-NP_TOKEN = "WRITE_YOUR_NP_TOKEN_HERE"
 PING_INTERVAL = 30  # seconds
 RETRIES = 60  # Global retry counter for ping failures
 
@@ -22,7 +21,7 @@ CONNECTION_STATES = {
 }
 
 status_connect = CONNECTION_STATES["NONE_CONNECTION"]
-token_info = NP_TOKEN
+token_info = None  # Token akan diminta dari pengguna
 browser_id = None
 account_info = {}
 
@@ -159,6 +158,15 @@ async def render_profile_info_with_semaphore(proxy, session):
         return await render_profile_info(proxy, session)
 
 async def main():
+    global token_info
+    
+    # Meminta input NP_TOKEN dari pengguna
+    token_info = input("Please enter your NP_TOKEN: ")
+    
+    if not token_info:
+        logger.error("NP_TOKEN is required. Exiting.")
+        return
+
     async with aiohttp.ClientSession() as session:  # Create one shared session for all requests
         with open('proxy.txt', 'r') as f:
             all_proxies = f.read().splitlines()
