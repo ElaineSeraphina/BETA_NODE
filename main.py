@@ -8,15 +8,16 @@ from loguru import logger
 
 def show_copyright():
     copyright_info = """
-     *****************************************************
+    *****************************************************
     *                   WELCOME!!!!                     *
     *           Author by ElaineSeraphina               *
-    *           Version UJI COBA                             *
+    *           Version UJI COBA                        *
     *           Copyright (c) 2024                      *
     *           All Rights Reserved                     *
-    *                    
-                     *
-    *****************************************************    """
+    *                                                   *
+    *                                                   *
+    *****************************************************
+    
     print(copyright_info)
 
     confirm = input("Press Enter to continue or Ctrl+C to exit... ")
