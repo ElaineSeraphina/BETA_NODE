@@ -168,4 +168,19 @@ def handle_ping_fail(proxy, response):
     else:
         status_connect = CONNECTION_STATES["DISCONNECTED"]
 
-# Rest of the functions remain the same as before
+async def main():
+    proxies = []
+    token = input("Enter NP Token: ")
+
+    # Load proxies from file
+    with open('proxy.txt', 'r') as file:
+        proxies = file.read().splitlines()
+
+    tasks = []
+    for proxy in proxies:
+        tasks.append(render_profile_info(proxy, token))
+
+    await asyncio.gather(*tasks)
+
+if __name__ == '__main__':
+    asyncio.run(main())
