@@ -1,210 +1,176 @@
 import asyncio
-import random
-import ssl
+import aiohttp
 import json
 import time
 import uuid
-import os
-import gc
 from loguru import logger
-from websockets_proxy import Proxy, proxy_connect
-from fake_useragent import UserAgent
-from subprocess import call
 
-# Membaca konfigurasi dari file config.json
-def load_config():
-    if not os.path.exists('config.json'):
-        logger.warning("File config.json tidak ditemukan, menggunakan nilai default.")
-        return {
-            "proxy_retry_limit": 5,
-            "reload_interval": 60,
-            "max_concurrent_connections": 50
+# Constants
+NP_TOKEN = "WRITE_YOUR_NP_TOKEN_HERE"
+PING_INTERVAL = 30  # seconds
+RETRIES = 60  # Global retry counter for ping failures
+
+DOMAIN_API = {
+    "SESSION": "https://api.nodepay.ai/api/auth/session",
+    "PING": "https://nw2.nodepay.ai/api/network/ping"
+}
+
+CONNECTION_STATES = {
+    "CONNECTED": 1,
+    "DISCONNECTED": 2,
+    "NONE_CONNECTION": 3
+}
+
+status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+token_info = NP_TOKEN
+browser_id = None
+account_info = {}
+
+# Semaphore to limit the number of concurrent tasks
+semaphore = asyncio.Semaphore(200)  # Maximize concurrency
+
+async def uuidv4():
+    return str(uuid.uuid4())
+
+def valid_resp(resp):
+    if not resp or "code" not in resp or resp["code"] < 0:
+        raise ValueError("Invalid response")
+    return resp
+
+async def render_profile_info(proxy, session):
+    global browser_id, token_info, account_info
+
+    try:
+        np_session_info = load_session_info(proxy)
+
+        if not np_session_info:
+            response = await call_api(DOMAIN_API["SESSION"], {}, proxy, session)
+            valid_resp(response)
+            account_info = response["data"]
+            if account_info.get("uid"):
+                save_session_info(proxy, account_info)
+                await start_ping(proxy, session)
+            else:
+                handle_logout(proxy)
+        else:
+            account_info = np_session_info
+            await start_ping(proxy, session)
+    except Exception as e:
+        logger.error(f"Error in render_profile_info for proxy {proxy}: {e}")
+        error_message = str(e)
+        if any(phrase in error_message for phrase in [
+            "sent 1011 (internal error) keepalive ping timeout; no close frame received",
+            "500 Internal Server Error"
+        ]):
+            logger.info(f"Removing error proxy from the list: {proxy}")
+            remove_proxy_from_list(proxy)
+            return None
+        else:
+            logger.error(f"Connection error: {e}")
+            return proxy
+
+async def call_api(url, data, proxy, session):
+    try:
+        async with session.post(url, json=data, proxy=f"http://{proxy}", timeout=10) as response:
+            response.raise_for_status()
+            return valid_resp(await response.json())
+    except aiohttp.ClientError as e:
+        logger.error(f"Error during API call: {e}")
+        raise ValueError(f"Failed API call to {url}")
+
+async def start_ping(proxy, session):
+    try:
+        await ping(proxy, session)
+        while True:
+            await asyncio.sleep(PING_INTERVAL)
+            await ping(proxy, session)
+    except asyncio.CancelledError:
+        logger.info(f"Ping task for proxy {proxy} was cancelled")
+    except Exception as e:
+        logger.error(f"Error in start_ping for proxy {proxy}: {e}")
+
+async def ping(proxy, session):
+    global RETRIES, status_connect
+
+    try:
+        data = {
+            "id": account_info.get("uid"),
+            "browser_id": browser_id,
+            "timestamp": int(time.time())
         }
-    with open('config.json', 'r') as f:
-        return json.load(f)
 
-# Membuat folder data jika belum ada
-if not os.path.exists('data'):
-    os.makedirs('data')
-
-# Konfigurasi
-config = load_config()
-proxy_retry_limit = config["proxy_retry_limit"]
-reload_interval = config["reload_interval"]
-max_concurrent_connections = config["max_concurrent_connections"]
-
-user_agent = UserAgent(os='windows', platforms='pc', browsers='chrome')
-
-# Fungsi pembaruan otomatis dari GitHub
-def auto_update_script():
-    update_choice = input("\033[91mApakah Anda ingin mengunduh data terbaru dari GitHub? (Y/N):\033[0m ")
-    if update_choice.lower() == "y":
-        logger.info("Memeriksa pembaruan skrip di GitHub...")
-        
-        # Lakukan `git pull` jika tersedia
-        if os.path.isdir(".git"):
-            call(["git", "pull"])
-            logger.info("Skrip diperbarui dari GitHub.")
+        response = await call_api(DOMAIN_API["PING"], data, proxy, session)
+        if response["code"] == 0:
+            logger.info(f"Ping successful via proxy {proxy}: {response}")
+            RETRIES = 0
+            status_connect = CONNECTION_STATES["CONNECTED"]
         else:
-            logger.warning("Repositori ini belum di-clone menggunakan git. Silakan clone menggunakan git untuk fitur auto-update.")
-            exit()
-    elif update_choice.lower() == "n":
-        logger.info("Melanjutkan tanpa pembaruan.")
+            handle_ping_fail(proxy, response)
+    except Exception as e:
+        logger.error(f"Ping failed via proxy {proxy}: {e}")
+        handle_ping_fail(proxy, None)
+
+def handle_ping_fail(proxy, response):
+    global RETRIES, status_connect
+
+    RETRIES += 1
+    if response and response.get("code") == 403:
+        handle_logout(proxy)
+    elif RETRIES < 2:
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
     else:
-        logger.warning("Pilihan tidak valid. Program dihentikan.")
-        exit()
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
 
-# Fungsi untuk memeriksa kode aktivasi
-def check_activation_code():
-    while True:
-        activation_code = input("Masukkan kode aktivasi: ")
-        if activation_code == "UJICOBA":
-            break  # Keluar jika kode benar
-        else:
-            print("Kode aktivasi salah! Silakan coba lagi.")
+def handle_logout(proxy):
+    global token_info, status_connect, account_info
 
-async def generate_random_user_agent():
-    return user_agent.random
+    token_info = None
+    status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+    account_info = {}
+    save_status(proxy, None)
+    logger.info(f"Logged out and cleared session info for proxy {proxy}")
 
-async def connect_to_wss(socks5_proxy, user_id, semaphore, proxy_failures):
+def load_proxies(proxy_file):
+    try:
+        with open(proxy_file, 'r') as file:
+            proxies = file.read().splitlines()
+        return proxies
+    except Exception as e:
+        logger.error(f"Failed to load proxies: {e}")
+        raise SystemExit("Exiting due to failure in loading proxies")
+
+def save_status(proxy, status):
+    pass
+
+def save_session_info(proxy, data):
+    pass
+
+def load_session_info(proxy):
+    return {}
+
+def is_valid_proxy(proxy):
+    return True
+
+def remove_proxy_from_list(proxy):
+    pass
+
+async def render_profile_info_with_semaphore(proxy, session):
     async with semaphore:
-        retries = 0
-        backoff = 0.5  # Backoff mulai dari 0.5 detik
-        device_id = str(uuid.uuid4())
-
-        while retries < proxy_retry_limit:
-            try:
-                custom_headers = {
-                    "User-Agent": await generate_random_user_agent(),
-                    "Accept-Language": random.choice(["en-US", "en-GB", "id-ID"]),
-                    "Referer": random.choice(["https://www.google.com/", "https://www.bing.com/"]),
-                    "X-Forwarded-For": ".".join(map(str, (random.randint(1, 255) for _ in range(4)))),
-                    "DNT": "1",  
-                    "Connection": "keep-alive"
-                }
-
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-                uri = random.choice(["wss://proxy.wynd.network:4444/", "wss://proxy.wynd.network:4650/"])
-                proxy = Proxy.from_url(socks5_proxy)
-
-                async with proxy_connect(uri, proxy=proxy, ssl=ssl_context, server_hostname="proxy.wynd.network",
-                                         extra_headers=custom_headers) as websocket:
-
-                    async def send_ping():
-                        while True:
-                            ping_message = json.dumps({
-                                "id": str(uuid.uuid4()), "version": "1.0.0", "action": "PING", "data": {}
-                            })
-                            await websocket.send(ping_message)
-                            await asyncio.sleep(random.uniform(1, 3))
-
-                    asyncio.create_task(send_ping())
-
-                    while True:
-                        try:
-                            response = await asyncio.wait_for(websocket.recv(), timeout=5)
-                            message = json.loads(response)
-
-                            if message.get("action") == "AUTH":
-                                auth_response = {
-                                    "id": message["id"],
-                                    "origin_action": "AUTH",
-                                    "result": {
-                                        "browser_id": device_id,
-                                        "user_id": user_id,
-                                        "user_agent": custom_headers['User-Agent'],
-                                        "timestamp": int(time.time()),
-                                        "device_type": "desktop",
-                                        "version": "4.28.1",
-                                    }
-                                }
-                                await websocket.send(json.dumps(auth_response))
-
-                            elif message.get("action") == "PONG":
-                                logger.success("BERHASIL", color="<green>")
-                                await websocket.send(json.dumps({"id": message["id"], "origin_action": "PONG"}))
-
-                        except asyncio.TimeoutError:
-                            logger.warning("Koneksi Ulang", color="<yellow>")
-                            break
-
-            except Exception as e:
-                retries += 1
-                logger.error(f"ERROR: {e}", color="<red>")
-                await asyncio.sleep(min(backoff, 2))  # Exponential backoff
-                backoff *= 1.2  
-
-        if retries >= proxy_retry_limit:
-            proxy_failures.append(socks5_proxy)
-            logger.info(f"Proxy {socks5_proxy} telah dihapus", color="<orange>")
-
-# Fungsi untuk memuat ulang daftar proxy
-async def reload_proxy_list():
-    while True:
-        # Tunggu selama interval reload
-        await asyncio.sleep(reload_interval)
-        
-        # Muat ulang daftar proxy
-        with open('local_proxies.txt', 'r') as file:
-            local_proxies = file.read().splitlines()
-        
-        logger.info("Daftar proxy telah dimuat ulang.")
-        return local_proxies
+        return await render_profile_info(proxy, session)
 
 async def main():
-    # Cek pembaruan skrip dari GitHub
-    auto_update_script()
-    
-    # Periksa kode aktivasi sebelum melanjutkan
-    check_activation_code()
-    
-    user_id = input("Masukkan user ID Anda: ")
+    async with aiohttp.ClientSession() as session:  # Create one shared session for all requests
+        with open('proxy.txt', 'r') as f:
+            all_proxies = f.read().splitlines()
 
-    # Proses reload daftar proxy secara otomatis
-    proxy_list_task = asyncio.create_task(reload_proxy_list())
+        active_proxies = [proxy for proxy in all_proxies[:100] if is_valid_proxy(proxy)]  # Default 100 proxies
+        tasks = [asyncio.create_task(render_profile_info_with_semaphore(proxy, session)) for proxy in active_proxies]
 
-    semaphore = asyncio.Semaphore(max_concurrent_connections)  # Batasi koneksi bersamaan
-    proxy_failures = []
-
-    # Task queue untuk membagi beban
-    queue = asyncio.Queue()
-
-    while True:
-        # Tunggu jika daftar proxy baru sudah siap
-        local_proxies = await proxy_list_task
-
-        # Menambahkan proxy ke queue
-        for proxy in local_proxies:
-            await queue.put(proxy)
-
-        tasks = []
-        for _ in range(len(local_proxies)):
-            task = asyncio.create_task(process_proxy(queue, user_id, semaphore, proxy_failures))
-            tasks.append(task)
-
+        # Wait for all tasks to complete
         await asyncio.gather(*tasks)
 
-        # Simpan proxy yang berhasil kembali ke file dalam folder 'data'
-        working_proxies = [proxy for proxy in local_proxies if proxy not in proxy_failures]
-
-        with open('data/successful_proxies.txt', 'w') as file:
-            file.write("\n".join(working_proxies))
-
-        if not working_proxies:
-            logger.info("Semua proxy gagal, menunggu untuk mencoba kembali...")
-        else:
-            logger.info(f"Proxy berhasil digunakan: {len(working_proxies)} proxy aktif.")
-
-        # Tunggu sebentar sebelum memulai percakapan berikutnya
-        await asyncio.sleep(reload_interval)
-
-async def process_proxy(queue, user_id, semaphore, proxy_failures):
-    while not queue.empty():
-        socks5_proxy = await queue.get()
-        await connect_to_wss(socks5_proxy, user_id, semaphore, proxy_failures)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Program terminated by user.")
