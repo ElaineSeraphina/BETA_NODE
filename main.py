@@ -25,7 +25,7 @@ def show_copyright():
 
 PING_INTERVAL = 60
 RETRIES = 120
-TOKEN_FILE = 'np_tokens.txt'
+TOKEN = "eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiIxMzAzNDA0NTQyNjc4Nzk0MjQwIiwiaWF0IjoxNzMxMjQ1MTA5LCJleHAiOjE3MzI0NTQ3MDl9.RJemH8mMM1qeVRfvmoxWm93SukDlqeVN3uDFN3NRPmlZQ4FZ7uQ_kTzh3quLiXSrxBUAhVlWqdrA9E7XBU_X1w"  # Replace with your actual NP token
 
 CONNECTION_STATES = {
     "CONNECTED": 1,
@@ -48,7 +48,7 @@ def valid_resp(resp):
 
 proxy_auth_status = {}
 
-async def render_profile_info(proxy, token):
+async def render_profile_info(proxy):
     global browser_id, account_info
 
     try:
@@ -56,7 +56,7 @@ async def render_profile_info(proxy, token):
         
         if not proxy_auth_status.get(proxy):
             browser_id = uuidv4()
-            response = await call_api("API_URL_HERE", {}, proxy, token)  # Replace with your API URL
+            response = await call_api("API_URL_HERE", {}, proxy)  # Replace with your API URL
             if response is None:
                 return
             valid_resp(response)
@@ -71,14 +71,14 @@ async def render_profile_info(proxy, token):
                 return
         
         if proxy_auth_status[proxy]:
-            await start_ping(proxy, token)
+            await start_ping(proxy)
 
     except Exception as e:
         logger.error(f"Error in render_profile_info for proxy {proxy}: {e}")
 
-async def call_api(url, data, proxy, token, max_retries=3):
+async def call_api(url, data, proxy, max_retries=3):
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {TOKEN}",
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
         "Accept": "application/json",
@@ -104,17 +104,17 @@ async def call_api(url, data, proxy, token, max_retries=3):
 
     return None
 
-async def start_ping(proxy, token):
+async def start_ping(proxy):
     try:
         while True:
-            await ping(proxy, token)
+            await ping(proxy)
             await asyncio.sleep(PING_INTERVAL)
     except asyncio.CancelledError:
         logger.info(f"{Fore.YELLOW}Ping task for proxy {proxy} was cancelled")
     except Exception as e:
         logger.error(f"{Fore.RED}Error in start_ping for proxy {proxy}: {e}")
 
-async def ping(proxy, token):
+async def ping(proxy):
     global last_ping_time, RETRIES, status_connect
 
     current_time = time.time()
@@ -133,7 +133,7 @@ async def ping(proxy, token):
                 "version": '2.2.7'
             }
             logger.warning(f"Starting ping task for proxy {proxy} Data: {data}")
-            response = await call_api(url, data, proxy, token)
+            response = await call_api(url, data, proxy)
             if response["code"] == 0:
                 logger.info(f"{Fore.CYAN}Ping successful via proxy {proxy} - {response}")
                 RETRIES = 0
@@ -188,38 +188,27 @@ def save_session_info(proxy, data):
 def load_session_info(proxy):
     return {}
 
-def load_tokens_from_file(filename):
-    try:
-        with open(filename, 'r') as file:
-            tokens = file.read().splitlines()
-        return tokens
-    except Exception as e:
-        logger.error(f"Failed to load tokens: {e}")
-        raise SystemExit("Exiting due to failure in loading tokens")
-
 async def main():
     show_copyright()
     print("Welcome to the main program!")
         
-    tokens = load_tokens_from_file(TOKEN_FILE)
+    # Token is now hardcoded in the script, no need to load from a file
 
     # Load proxies from the local file proxy.txt
     proxies = load_proxies_from_file("proxy.txt")  # File is expected to be in the same directory
 
     while True:
-        for token in tokens:
-            tasks = {asyncio.create_task(render_profile_info(proxy, token)): proxy for proxy in proxies}
+        tasks = {asyncio.create_task(render_profile_info(proxy)): proxy for proxy in proxies}
 
-            done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                tasks.pop(task)
+        done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            tasks.pop(task)
 
-            for proxy in set(proxies) - set(tasks.values()):
-                new_task = asyncio.create_task(render_profile_info(proxy, token))
-                tasks[new_task] = proxy
+        for proxy in set(proxies) - set(tasks.values()):
+            new_task = asyncio.create_task(render_profile_info(proxy))
+            tasks[new_task] = proxy
 
-            await asyncio.sleep(3)
-        await asyncio.sleep(10)
+        await asyncio.sleep(3)
 
 if __name__ == '__main__':
     try:
