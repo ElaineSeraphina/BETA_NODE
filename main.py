@@ -195,7 +195,6 @@ async def process_proxies(proxy_queue, token):
         proxy_queue.task_done()
 
 async def main():
-    show_copyright()
     print("Welcome to the main program!")
     
     token = load_token_from_input()  # Ambil token dari input pengguna
