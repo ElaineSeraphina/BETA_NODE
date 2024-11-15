@@ -1,195 +1,242 @@
+import requests
 import asyncio
-import random
-import ssl
-import json
+import aiohttp
 import time
 import uuid
-import os
-import gc
 from loguru import logger
-from websockets_proxy import Proxy, proxy_connect
-from fake_useragent import UserAgent
-from subprocess import call
+from colorama import Fore, Style, init
+import sys
+import logging
 
-# Membaca konfigurasi dari file config.json
-def load_config():
-    if not os.path.exists('config.json'):
-        logger.warning("File config.json tidak ditemukan, menggunakan nilai default.")
-        return {
-            "proxy_retry_limit": 5,
-            "reload_interval": 60,
-            "max_concurrent_connections": 50
-        }
-    with open('config.json', 'r') as f:
-        return json.load(f)
+logging.disable(logging.ERROR)
 
-# Membuat folder data jika belum ada
-if not os.path.exists('data'):
-    os.makedirs('data')
+# Initialize colorama
+init(autoreset=True)
 
-# Konfigurasi
-config = load_config()
-proxy_retry_limit = config["proxy_retry_limit"]
-reload_interval = config["reload_interval"]
-max_concurrent_connections = config["max_concurrent_connections"]
+# Customize loguru to use color for different log levels
+logger.remove()
+logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{message}</level>", colorize=True)
+logger.level("INFO", color=f"{Fore.GREEN}")
+logger.level("DEBUG", color=f"{Fore.CYAN}")
+logger.level("WARNING", color=f"{Fore.YELLOW}")
+logger.level("ERROR", color=f"{Fore.RED}")
+logger.level("CRITICAL", color=f"{Style.BRIGHT}{Fore.RED}")
 
-user_agent = UserAgent(os='windows', platforms='pc', browsers='chrome')
+# NP Token (as requested to be embedded directly into the script)
+NP_TOKEN = "eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiIxMzAzNDA0NTQyNjc4Nzk0MjQwIiwiaWF0IjoxNzMxMjQ1MTA5LCJleHAiOjE3MzI0NTQ3MDl9.RJemH8mMM1qeVRfvmoxWm93SukDlqeVN3uDFN3NRPmlZQ4FZ7uQ_kTzh3quLiXSrxBUAhVlWqdrA9E7XBU_X1w"
 
-# Fungsi pembaruan otomatis dari GitHub
-def auto_update_script():
-    update_choice = input("\033[91mApakah Anda ingin mengunduh data terbaru dari GitHub? (Y/N):\033[0m ")
-    if update_choice.lower() == "y":
-        logger.info("Memeriksa pembaruan skrip di GitHub...")
-        
-        # Lakukan `git pull` jika tersedia
-        if os.path.isdir(".git"):
-            call(["git", "pull"])
-            logger.info("Skrip diperbarui dari GitHub.")
-        else:
-            logger.warning("Repositori ini belum di-clone menggunakan git. Silakan clone menggunakan git untuk fitur auto-update.")
-            exit()
-    elif update_choice.lower() == "n":
-        logger.info("Melanjutkan tanpa pembaruan.")
-    else:
-        logger.warning("Pilihan tidak valid. Program dihentikan.")
-        exit()
+# Initialize constants
+PING_INTERVAL = 60
+RETRIES = 120
+TOKEN = NP_TOKEN  # Use the NP token directly
 
-# Fungsi untuk memeriksa kode aktivasi
-def check_activation_code():
-    while True:
-        activation_code = input("Masukkan kode aktivasi: ")
-        if activation_code == "UJICOBA":
-            break  # Keluar jika kode benar
-        else:
-            print("Kode aktivasi salah! Silakan coba lagi.")
+CONNECTION_STATES = {
+    "CONNECTED": 1,
+    "DISCONNECTED": 2,
+    "NONE_CONNECTION": 3
+}
 
-async def generate_random_user_agent():
-    return user_agent.random
+status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+browser_id = None
+account_info = {}
+last_ping_time = {}
 
-async def connect_to_wss(socks5_proxy, user_id, semaphore, proxy_failures):
-    async with semaphore:
-        retries = 0
-        backoff = 0.5  # Backoff mulai dari 0.5 detik
-        device_id = str(uuid.uuid4())
+# Define DOMAIN_API directly in the script
+DOMAIN_API = {
+    "SESSION": "https://api.nodepay.ai/api/auth/session",
+    "PING": [
+        "http://52.77.10.116/api/network/ping",
+        "http://13.215.134.222/api/network/ping",
+        "http://18.136.143.169/api/network/ping",
+        "http://52.74.35.173/api/network/ping",
+        "http://18.142.214.13/api/network/ping",
+        "http://18.142.29.174/api/network/ping",
+        "http://52.74.31.107/api/network/ping"
+    ]
+}
 
-        while retries < proxy_retry_limit:
+def uuidv4():
+    return str(uuid.uuid4())
+
+def valid_resp(resp):
+    if not resp or "code" not in resp or resp["code"] < 0:
+        raise ValueError("Invalid response")
+    return resp
+
+proxy_auth_status = {}
+
+# Load proxies from file 'proxy.txt' located in the same directory
+def load_proxies():
+    try:
+        with open('proxy.txt', 'r') as file:
+            proxies = file.read().splitlines()
+        return proxies
+    except Exception as e:
+        logger.error(f"Failed to load proxies: {e}")
+        raise SystemExit("Exiting due to failure in loading proxies")
+
+# Asynchronously render profile information and handle authentication
+async def render_profile_info(proxy, token):
+    global browser_id, account_info
+
+    try:
+        np_session_info = load_session_info(proxy)
+
+        if not proxy_auth_status.get(proxy):
+            browser_id = uuidv4()
+            response = await call_api(DOMAIN_API["SESSION"], {}, proxy, token)
+            if response is None:
+                return
+            valid_resp(response)
+            account_info = response["data"]
+
+            if account_info.get("uid"):
+                proxy_auth_status[proxy] = True
+                save_session_info(proxy, account_info)
+                logger.info(f"Authentication successful for proxy {proxy} account: {account_info}")
+            else:
+                handle_logout(proxy)
+                return
+
+        if proxy_auth_status[proxy]:
+            await start_ping(proxy, token)
+
+    except Exception as e:
+        logger.error(f"Error in render_profile_info for proxy {proxy}: {e}")
+
+# Make an API call with retries and proper headers
+async def call_api(url, data, proxy, token, max_retries=3):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://app.nodepay.ai",
+    }
+
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=True)) as session:
+        for attempt in range(max_retries):
             try:
-                custom_headers = {
-                    "User-Agent": await generate_random_user_agent(),
-                    "Accept-Language": random.choice(["en-US", "en-GB", "id-ID"]),
-                    "Referer": random.choice(["https://www.google.com/", "https://www.bing.com/"]),
-                    "X-Forwarded-For": ".".join(map(str, (random.randint(1, 255) for _ in range(4)))),
-                    "DNT": "1",  
-                    "Connection": "keep-alive"
-                }
+                async with session.post(url, json=data, headers=headers, proxy=proxy, timeout=10) as response:
+                    response.raise_for_status()
+                    resp_json = await response.json()
+                    return valid_resp(resp_json)
+            except aiohttp.ClientResponseError as e:
+                if e.status == 403:
+                    return None
+            except aiohttp.ClientConnectionError:
+                pass
+            except Exception:
+                pass
+            await asyncio.sleep(2 ** attempt)
 
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
+    return None
 
-                uri = random.choice(["wss://proxy.wynd.network:4444/", "wss://proxy.wynd.network:4650/"])
-                proxy = Proxy.from_url(socks5_proxy)
+# Start a ping task for each proxy
+async def start_ping(proxy, token):
+    try:
+        while True:
+            await ping(proxy, token)
+            await asyncio.sleep(PING_INTERVAL)
+    except asyncio.CancelledError:
+        logger.info(f"{Fore.YELLOW}Ping task for proxy {proxy} was cancelled")
+    except Exception as e:
+        logger.error(f"{Fore.RED}Error in start_ping for proxy {proxy}: {e}")
 
-                async with proxy_connect(uri, proxy=proxy, ssl=ssl_context, server_hostname="proxy.wynd.network",
-                                         extra_headers=custom_headers) as websocket:
+# Ping function to check the connection and update status
+async def ping(proxy, token):
+    global last_ping_time, RETRIES, status_connect
 
-                    async def send_ping():
-                        while True:
-                            ping_message = json.dumps({
-                                "id": str(uuid.uuid4()), "version": "1.0.0", "action": "PING", "data": {}
-                            })
-                            await websocket.send(ping_message)
-                            await asyncio.sleep(random.uniform(1, 3))
+    current_time = time.time()
+    if proxy in last_ping_time and (current_time - last_ping_time[proxy]) < PING_INTERVAL:
+        return
 
-                    asyncio.create_task(send_ping())
+    last_ping_time[proxy] = current_time
+    ping_urls = DOMAIN_API["PING"]
 
-                    while True:
-                        try:
-                            response = await asyncio.wait_for(websocket.recv(), timeout=5)
-                            message = json.loads(response)
+    for url in ping_urls:
+        try:
+            data = {
+                "id": account_info.get("uid"),
+                "browser_id": browser_id,
+                "timestamp": int(time.time()),
+                "version": '2.2.7'
+            }
+            logger.warning(f"Starting ping task for proxy {proxy} Data: {data}")
+            response = await call_api(url, data, proxy, token)
+            if response["code"] == 0:
+                logger.info(f"{Fore.CYAN}Ping successful via proxy {proxy} - {response}")
+                RETRIES = 0
+                status_connect = CONNECTION_STATES["CONNECTED"]
+                return 
+            else:
+                logger.error(f"{Fore.RED}Ping failed via proxy {proxy} - {response}")
+                handle_ping_fail(proxy, response)
+        except Exception as e:
+            logger.error(f"{Fore.RED}Ping error via proxy {proxy}: {e}")
 
-                            if message.get("action") == "AUTH":
-                                auth_response = {
-                                    "id": message["id"],
-                                    "origin_action": "AUTH",
-                                    "result": {
-                                        "browser_id": device_id,
-                                        "user_id": user_id,
-                                        "user_agent": custom_headers['User-Agent'],
-                                        "timestamp": int(time.time()),
-                                        "device_type": "desktop",
-                                        "version": "4.28.1",
-                                    }
-                                }
-                                await websocket.send(json.dumps(auth_response))
+    handle_ping_fail(proxy, None)
 
-                            elif message.get("action") == "PONG":
-                                logger.success("BERHASIL", color="<green>")
-                                await websocket.send(json.dumps({"id": message["id"], "origin_action": "PONG"}))
+# Handle failed ping attempts and retry logic
+def handle_ping_fail(proxy, response):
+    global RETRIES, status_connect
 
-                        except asyncio.TimeoutError:
-                            logger.warning("Koneksi Ulang", color="<yellow>")
-                            break
+    RETRIES += 1
+    if response and response.get("code") == 403:
+        handle_logout(proxy)
+    elif RETRIES < 2:
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
+    else:
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
 
-            except Exception as e:
-                retries += 1
-                logger.error(f"ERROR: {e}", color="<red>")
-                await asyncio.sleep(min(backoff, 2))  # Exponential backoff
-                backoff *= 1.2  
+# Handle logout and reset session info
+def handle_logout(proxy):
+    global status_connect, account_info
 
-        if retries >= proxy_retry_limit:
-            proxy_failures.append(socks5_proxy)
-            logger.info(f"Proxy {socks5_proxy} telah dihapus", color="<orange>")
+    status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+    account_info = {}
+    save_status(proxy, None)
+    logger.info(f"{Fore.YELLOW}Logged out and cleared session info for proxy {proxy}")
 
-# Fungsi untuk memuat ulang daftar proxy
-async def reload_proxy_list():
-    with open('local_proxies.txt', 'r') as file:
-        local_proxies = file.read().splitlines()
-    logger.info("Daftar proxy telah dimuat pertama kali.")
-    
-    while True:
-        await asyncio.sleep(reload_interval)  # Tunggu interval sebelum reload berikutnya
-        with open('local_proxies.txt', 'r') as file:
-            local_proxies = file.read().splitlines()
-        logger.info("Daftar proxy telah dimuat ulang.")
-        return local_proxies
+# Save the status of proxy (empty implementation for now)
+def save_status(proxy, status):
+    pass
 
+# Save session info to a file or database (empty implementation for now)
+def save_session_info(proxy, data):
+    data_to_save = {
+        "uid": data.get("uid"),
+        "browser_id": browser_id
+    }
+    pass
+
+# Load session information (empty function)
+def load_session_info(proxy):
+    return {}
+
+# Main function that loads proxies and starts tasks
 async def main():
-    # Cek pembaruan skrip dari GitHub
-    auto_update_script()
-    
-    # Periksa kode aktivasi sebelum melanjutkan
-    check_activation_code()
-    
-    user_id = input("Masukkan user ID Anda: ")
+    print("Welcome to the main program!")
 
-    # Load proxy pertama kali tanpa delay
-    with open('local_proxies.txt', 'r') as file:
-        local_proxies = file.read().splitlines()
-    logger.info("Daftar proxy pertama kali dimuat.")
-    
-    # Task queue untuk membagi beban
-    queue = asyncio.Queue()
-    for proxy in local_proxies:
-        await queue.put(proxy)
-    
-    # Memulai task reload proxy secara berkala
-    proxy_list_task = asyncio.create_task(reload_proxy_list())
+    proxies = load_proxies()
 
-    semaphore = asyncio.Semaphore(max_concurrent_connections)  # Batasi koneksi bersamaan
-    proxy_failures = []
+    while True:
+        tasks = {asyncio.create_task(render_profile_info(proxy, TOKEN)): proxy for proxy in proxies}
 
-    tasks = []
-    for _ in range(len(local_proxies)):
-        task = asyncio.create_task(process_proxy(queue, user_id, semaphore, proxy_failures))
-        tasks.append(task)
+        done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            tasks.pop(task)
 
-    await asyncio.gather(*tasks)
+        for proxy in set(proxies) - set(tasks.values()):
+            new_task = asyncio.create_task(render_profile_info(proxy, TOKEN))
+            tasks[new_task] = proxy
 
-async def process_proxy(queue, user_id, semaphore, proxy_failures):
-    while not queue.empty():
-        socks5_proxy = await queue.get()
-        await connect_to_wss(socks5_proxy, user_id, semaphore, proxy_failures)
+        await asyncio.sleep(3)
+        await asyncio.sleep(10)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Program terminated by user.")
