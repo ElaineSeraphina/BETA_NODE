@@ -3,3 +3,8 @@ fake_useragent
 websockets
 asyncio
 sqlite3
+asyncio
+aiohttp
+uuid
+cloudscraper
+loguru
