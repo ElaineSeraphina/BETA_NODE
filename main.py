@@ -2,86 +2,101 @@ import asyncio
 import aiohttp
 import time
 import uuid
+import cloudscraper  
 from loguru import logger
-from colorama import Fore, Style, init
-import sys
 
-# Initialize colorama
-init(autoreset=True)
 
-# Customize loguru to use color for different log levels
-logger.remove()
-logger.add(sys.stdout, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{message}</level>", colorize=True)
-logger.level("INFO", color=f"{Fore.GREEN}")
-logger.level("DEBUG", color=f"{Fore.CYAN}")
-logger.level("WARNING", color=f"{Fore.YELLOW}")
-logger.level("ERROR", color=f"{Fore.RED}")
-logger.level("CRITICAL", color=f"{Style.BRIGHT}{Fore.RED}")
+def show_copyright():
+    copyright_info = """
+     *****************************************************
+    *                   WELCOME!!!!                     *
+    *           Author by ElaineSeraphina               *
+    *           Version UJI COBA                             *
+    *           Copyright (c) 2024                      *
+    *           All Rights Reserved                     *
+    *                    
+                     *
+    *****************************************************    """
+    print(copyright_info)
 
-# Global dictionary to track the authentication status of proxies
-proxy_auth_status = {}
+    confirm = input("Press Enter to continue or Ctrl+C to exit... ")
+
+    if confirm.strip() == "":
+        print("Continuing with the program...")
+    else:
+        print("Exiting the program.")
+        exit()
+
 
 # Constants
-MAX_CONCURRENT_TASKS = 100  # Adjust as per system capability
-PING_INTERVAL = 60
-RETRIES = 120
-TOKEN_FILE = 'np_tokens.txt'
-CONNECTION_TIMEOUT = 15  # Timeout in seconds
+PING_INTERVAL = 60  
+RETRIES = 60  
+PROXY_FILE = 'proxy.txt'  # Changed from 'proxy_1.txt'
+TOKEN_FILE = 'np_tokens_1.txt'  
 
-# Connection states
+DOMAIN_API = {
+    "SESSION": "https://api.nodepay.ai/api/auth/session",
+    "PING": "http://52.77.10.116/api/network/ping"
+}
+
 CONNECTION_STATES = {
     "CONNECTED": 1,
     "DISCONNECTED": 2,
     "NONE_CONNECTION": 3
 }
 
-# Initialize global variables
 status_connect = CONNECTION_STATES["NONE_CONNECTION"]
 browser_id = None
 account_info = {}
-last_ping_time = {}
+last_ping_time = {}  
 
-# Semaphore to limit the number of concurrent tasks
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 def uuidv4():
     return str(uuid.uuid4())
+
 
 def valid_resp(resp):
     if not resp or "code" not in resp or resp["code"] < 0:
         raise ValueError("Invalid response")
     return resp
 
+
 async def render_profile_info(proxy, token):
-    global browser_id, account_info, proxy_auth_status
+    global browser_id, account_info
 
     try:
         np_session_info = load_session_info(proxy)
-        
-        if not proxy_auth_status.get(proxy):
+
+        if not np_session_info:
+            # Generate new browser_id
             browser_id = uuidv4()
             response = await call_api(DOMAIN_API["SESSION"], {}, proxy, token)
-            if response is None:
-                return
             valid_resp(response)
             account_info = response["data"]
-            
             if account_info.get("uid"):
-                proxy_auth_status[proxy] = True
                 save_session_info(proxy, account_info)
-                logger.info(f"Authentication successful for proxy {proxy} account: {account_info}")
+                await start_ping(proxy, token)
             else:
                 handle_logout(proxy)
-                return
-        
-        if proxy_auth_status.get(proxy):
+        else:
+            account_info = np_session_info
             await start_ping(proxy, token)
-
     except Exception as e:
         logger.error(f"Error in render_profile_info for proxy {proxy}: {e}")
+        error_message = str(e)
+        if any(phrase in error_message for phrase in [
+            "sent 1011 (internal error) keepalive ping timeout; no close frame received",
+            "500 Internal Server Error"
+        ]):
+            logger.info(f"Removing error proxy from the list: {proxy}")
+            remove_proxy_from_list(proxy)
+            return None
+        else:
+            logger.error(f"Connection error: {e}")
+            return proxy
 
-# Retry logic with exponential backoff
-async def call_api(url, data, proxy, token, max_retries=5, timeout=CONNECTION_TIMEOUT):
+
+async def call_api(url, data, proxy, token):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -91,28 +106,18 @@ async def call_api(url, data, proxy, token, max_retries=5, timeout=CONNECTION_TI
         "Referer": "https://app.nodepay.ai",
     }
 
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=True)) as session:
-        for attempt in range(max_retries):
-            try:
-                async with session.post(url, json=data, headers=headers, proxy=proxy, timeout=timeout) as response:
-                    response.raise_for_status()
-                    resp_json = await response.json()
-                    return valid_resp(resp_json)
-            except aiohttp.ClientResponseError as e:
-                if e.status == 403:
-                    logger.error(f"403 Error: Forbidden for proxy {proxy}")
-                    return None
-            except aiohttp.ClientConnectionError as e:
-                logger.warning(f"Connection error for proxy {proxy}, retrying...")
-            except asyncio.TimeoutError as e:
-                logger.warning(f"Timeout error for proxy {proxy}, retrying...")
-            except Exception as e:
-                logger.error(f"Error occurred for proxy {proxy}: {e}")
-            
-            # Exponential backoff
-            await asyncio.sleep(2 ** attempt)  # Increasing delay between retries
+    try:
+        scraper = cloudscraper.create_scraper()
 
-    return None
+        response = scraper.post(url, json=data, headers=headers, proxies={
+                                "http": proxy, "https": proxy}, timeout=10)
+
+        response.raise_for_status()
+        return valid_resp(response.json())
+    except Exception as e:
+        logger.error(f"Error during API call: {e}")
+        raise ValueError(f"Failed API call to {url}")
+
 
 async def start_ping(proxy, token):
     try:
@@ -120,42 +125,40 @@ async def start_ping(proxy, token):
             await ping(proxy, token)
             await asyncio.sleep(PING_INTERVAL)
     except asyncio.CancelledError:
-        logger.info(f"{Fore.YELLOW}Ping task for proxy {proxy} was cancelled")
+        logger.info(f"Ping task for proxy {proxy} was cancelled")
     except Exception as e:
-        logger.error(f"{Fore.RED}Error in start_ping for proxy {proxy}: {e}")
+        logger.error(f"Error in start_ping for proxy {proxy}: {e}")
+
 
 async def ping(proxy, token):
     global last_ping_time, RETRIES, status_connect
 
     current_time = time.time()
+
     if proxy in last_ping_time and (current_time - last_ping_time[proxy]) < PING_INTERVAL:
+        logger.info(f"Skipping ping for proxy { proxy}, not enough time elapsed")
         return
 
     last_ping_time[proxy] = current_time
-    ping_urls = DOMAIN_API["PING"]
 
-    for url in ping_urls:
-        try:
-            data = {
-                "id": account_info.get("uid"),
-                "browser_id": browser_id,
-                "timestamp": int(time.time()),
-                "version": '2.2.7'
-            }
-            logger.warning(f"Starting ping task for proxy {proxy} Data: {data}")
-            response = await call_api(url, data, proxy, token)
-            if response and response["code"] == 0:
-                logger.info(f"{Fore.CYAN}Ping successful via proxy {proxy} - {response}")
-                RETRIES = 0
-                status_connect = CONNECTION_STATES["CONNECTED"]
-                return 
-            else:
-                logger.error(f"{Fore.RED}Ping failed via proxy {proxy} - {response}")
-                handle_ping_fail(proxy, response)
-        except Exception as e:
-            logger.error(f"{Fore.RED}Ping error via proxy {proxy}: {e}")
+    try:
+        data = {
+            "id": account_info.get("uid"),
+            "browser_id": browser_id,  
+            "timestamp": int(time.time())
+        }
 
-    handle_ping_fail(proxy, None)  
+        response = await call_api(DOMAIN_API["PING"], data, proxy, token)
+        if response["code"] == 0:
+            logger.info(f"Ping successful via proxy {proxy}: {response}")
+            RETRIES = 0
+            status_connect = CONNECTION_STATES["CONNECTED"]
+        else:
+            handle_ping_fail(proxy, response)
+    except Exception as e:
+        logger.error(f"Ping failed via proxy {proxy}: {e}")
+        handle_ping_fail(proxy, None)
+
 
 def handle_ping_fail(proxy, response):
     global RETRIES, status_connect
@@ -168,19 +171,10 @@ def handle_ping_fail(proxy, response):
     else:
         status_connect = CONNECTION_STATES["DISCONNECTED"]
 
-async def main():
-    proxies = []
-    token = input("Enter NP Token: ")
 
-    # Load proxies from file
-    with open('proxy.txt', 'r') as file:
-        proxies = file.read().splitlines()
+def handle_logout(proxy):
+    global status_connect, account_info
 
-    tasks = []
-    for proxy in proxies:
-        tasks.append(render_profile_info(proxy, token))
-
-    await asyncio.gather(*tasks)
-
-if __name__ == '__main__':
-    asyncio.run(main())
+    status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+    account_info = {}
+    save_status(proxy, None
