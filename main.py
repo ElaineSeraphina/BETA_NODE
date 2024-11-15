@@ -1,13 +1,10 @@
 import asyncio
 import aiohttp
 import time
-import requests
 import uuid
 from loguru import logger
 from colorama import Fore, Style, init
 import sys
-import logging
-logging.disable(logging.ERROR)
 
 # Initialize colorama
 init(autoreset=True)
@@ -21,23 +18,27 @@ logger.level("WARNING", color=f"{Fore.YELLOW}")
 logger.level("ERROR", color=f"{Fore.RED}")
 logger.level("CRITICAL", color=f"{Style.BRIGHT}{Fore.RED}")
 
-def show_copyright():
-    print(Fore.MAGENTA + Style.BRIGHT + "Your Banner Here" + Style.RESET_ALL)
-
+# Constants
+MAX_CONCURRENT_TASKS = 100  # Tentukan sesuai dengan kemampuan sistem
 PING_INTERVAL = 60
 RETRIES = 120
 TOKEN_FILE = 'np_tokens.txt'
 
+# Connection states
 CONNECTION_STATES = {
     "CONNECTED": 1,
     "DISCONNECTED": 2,
     "NONE_CONNECTION": 3
 }
 
+# Initialize global variables
 status_connect = CONNECTION_STATES["NONE_CONNECTION"]
 browser_id = None
 account_info = {}
 last_ping_time = {}
+
+# Semaphore to limit the number of concurrent tasks
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 def uuidv4():
     return str(uuid.uuid4())
@@ -47,8 +48,6 @@ def valid_resp(resp):
         raise ValueError("Invalid response")
     return resp
 
-proxy_auth_status = {}
-
 async def render_profile_info(proxy, token):
     global browser_id, account_info
 
@@ -57,7 +56,7 @@ async def render_profile_info(proxy, token):
         
         if not proxy_auth_status.get(proxy):
             browser_id = uuidv4()
-            response = await call_api("your_api_url_here", {}, proxy, token)
+            response = await call_api(DOMAIN_API["SESSION"], {}, proxy, token)
             if response is None:
                 return
             valid_resp(response)
@@ -94,15 +93,11 @@ async def call_api(url, data, proxy, token, max_retries=3):
                     response.raise_for_status()
                     resp_json = await response.json()
                     return valid_resp(resp_json)
-            except aiohttp.ClientResponseError as e:
-                if e.status == 403:                    
-                    return None
-            except aiohttp.ClientConnectionError:
+            except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError):
                 pass
-            except Exception:
+            except asyncio.TimeoutError:
                 pass
             await asyncio.sleep(2 ** attempt)
-
     return None
 
 async def start_ping(proxy, token):
@@ -123,7 +118,7 @@ async def ping(proxy, token):
         return
 
     last_ping_time[proxy] = current_time
-    ping_urls = ["your_ping_url_here"]  # Replace with the correct URLs for pinging
+    ping_urls = DOMAIN_API["PING"]
 
     for url in ping_urls:
         try:
@@ -190,31 +185,32 @@ def load_session_info(proxy):
     return {}
 
 def load_token_from_input():
-    # Ask user to input token
-    token = input("Please enter your NP token: ")
+    token = input("Please enter your NP token: ").strip()
     return token
+
+async def process_proxies(proxy_queue, token):
+    while not proxy_queue.empty():
+        proxy = await proxy_queue.get()
+        await render_profile_info(proxy, token)
+        proxy_queue.task_done()
 
 async def main():
     show_copyright()
     print("Welcome to the main program!")
+    
+    token = load_token_from_input()  # Ambil token dari input pengguna
+    all_proxies = load_proxies('proxy.txt')  # Load proxy dari file proxy.txt
+    proxy_queue = asyncio.Queue()
 
-    token = load_token_from_input()  # Get token from user input
+    # Masukkan semua proxy ke dalam antrian
+    for proxy in all_proxies:
+        await proxy_queue.put(proxy)
 
-    all_proxies = load_proxies('proxy.txt')  # Load proxies from proxy.txt file
+    # Tentukan jumlah worker yang memproses proxy secara bersamaan
+    workers = [asyncio.create_task(process_proxies(proxy_queue, token)) for _ in range(10)]  # Tentukan worker sesuai kebutuhan
 
-    while True:
-        tasks = {asyncio.create_task(render_profile_info(proxy, token)): proxy for proxy in all_proxies}
-
-        done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            tasks.pop(task)
-
-        for proxy in set(all_proxies) - set(tasks.values()):
-            new_task = asyncio.create_task(render_profile_info(proxy, token))
-            tasks[new_task] = proxy
-
-        await asyncio.sleep(3)
-        await asyncio.sleep(10)
+    await asyncio.gather(*workers)
+    await proxy_queue.join()  # Tunggu hingga semua proxy diproses
 
 if __name__ == '__main__':
     try:
